@@ -2,7 +2,7 @@
 
 ## Repository Status
 
-Always Just is currently a local design-stage project. `README.md` is the Software Design Description (SDD); there is not yet a Rust workspace, Cargo manifest, source tree, build system, test suite, or CI configuration. Do not assume that the C++ snippets in the SDD are implemented code: they are language-agnostic design sketches that should be translated into idiomatic Rust as implementation begins.
+Always Just is a local Rust proof-of-concept. `README.md` is the Software Design Description (SDD), and the current crate implements Phase 1: deterministic sine synthesis, note tracking, 12-TET conversion, basic Standard MIDI File parsing, and offline mono WAV rendering. Do not assume that the C++ snippets in the SDD are implemented code: they are design sketches translated into idiomatic Rust.
 
 Work locally by default. Do not add GitHub Actions, remote integrations, or repository-hosting assumptions unless explicitly requested.
 
@@ -73,9 +73,7 @@ Do not introduce plugin or UI dependencies into the core tuning/DSP layer. Keep 
 
 ## Build, Test, and Lint
 
-There are currently no repository-defined build, test, or lint commands because the Rust project has not been initialized.
-
-After adding Cargo metadata, use the commands defined by that project:
+Use the repository's Cargo commands:
 
 - Build/check: `cargo check` (or `cargo build` when a compiled artifact is needed)
 - Format: `cargo fmt --all -- --check`; apply formatting with `cargo fmt --all`
@@ -83,7 +81,7 @@ After adding Cargo metadata, use the commands defined by that project:
 - Full tests: `cargo test`
 - One test: `cargo test <test_name_substring>`; for an exact integration-test target, use `cargo test --test <target> <test_name_substring>`
 
-Add repository-specific flags or package selectors here only after they exist in `Cargo.toml` or project documentation. Tests for tuning math, frequency conversion, smoothing, envelopes, and offline voice rendering should remain runnable without MIDI or audio hardware.
+The current CLI accepts `aways-just demo <output.wav> [seconds]` and `aways-just render <input.mid> <output.wav>`. Tests for tuning math, frequency conversion, MIDI parsing, and offline voice rendering should remain runnable without MIDI or audio hardware.
 
 ## Reference
 

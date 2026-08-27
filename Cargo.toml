@@ -1,0 +1,13 @@
+[package]
+name = "aways-just"
+version = "0.1.0"
+edition = "2021"
+description = "Offline proof-of-concept synthesizer for Always Just"
+
+[lib]
+name = "aways_just"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aways-just"
+path = "src/main.rs"

@@ -1,4 +1,83 @@
-Here is a comprehensive Software Design Description (SDD) for **Always Just**. It focuses on dynamic microtonal pitch adjustment, real-time polyphonic MIDI processing, and modular audio synthesis.
+# Always Just
+
+Always Just is a Rust-based, real-time-oriented microtonal synthesizer. It adjusts active MIDI pitches dynamically toward adaptive Just Intonation, reducing beat frequencies in polyphonic music. The current implementation is an offline renderer with the Phase 1 sine-synthesis foundation and a Phase 2 key-based tuning engine.
+
+The project is intentionally local for now. MIDI and WAV files can live in a local music directory or any other local directory; no GitHub repository or online service is required to build or run it.
+
+## Quick Start
+
+Install Rust and Cargo, plus the native build tools required by Rust's target platform. These tools are not Rust crate dependencies, but they are typical for Rust applications that produce native executables: Cargo invokes the platform linker during `cargo build`, `cargo run`, and test execution. On Linux this usually means a C compiler driver such as `cc` or `gcc`; macOS requires Apple's Xcode Command Line Tools; Windows requires the MSVC or GNU build tools appropriate to the selected Rust toolchain.
+
+For Debian or Ubuntu:
+
+```sh
+sudo apt install build-essential
+```
+
+For Fedora:
+
+```sh
+sudo dnf groupinstall "Development Tools"
+```
+
+For macOS:
+
+```sh
+xcode-select --install
+```
+
+Then install Rust and Cargo with [rustup](https://rustup.rs/) and run:
+
+```sh
+cargo check
+cargo test
+cargo run -- demo demo.wav 2
+```
+
+On Linux and macOS, Cargo uses the platform's native linker. Install the standard C build tools for your operating system if Rust reports that `cc` or another system linker is missing; the project deliberately does not pin a machine-specific linker path.
+
+The demo writes a two-second C-major chord to `demo.wav`. To render a Standard MIDI File:
+
+```sh
+cargo run -- render \
+  "/path/to/Music/pachelbel_canon_and_gigue_(c)icking-archive.mid" \
+  "/path/to/Music/pachelbel_canon_and_gigue_phase1.wav"
+```
+
+The `render` command prints diagnostics to the terminal before writing the WAV. The output file is mono, 16-bit PCM at 44.1 kHz.
+
+### Finding MIDI test files
+
+The Pachelbel Canon MIDI used during Phase 1 testing, along with other useful classical MIDI files, can be downloaded from [Kunst der Fuge's Pachelbel page](https://www.kunstderfuge.com/pachelbel.htm). You can use any compatible MIDI files; place them in a local directory such as `~/Music` or pass an explicit path to `cargo run -- render`.
+
+## Diagnostics
+
+For each MIDI render, the application reports:
+
+- Input path and estimated render duration
+- Number of note-on and note-off events
+- Maximum simultaneous voices observed
+- Heuristic key changes with timestamps
+- Active voice count and a confidence gap for each key estimate
+
+Key detection uses a decaying history of recent pitch classes and compares it with major/minor tonal profiles. The detected key's tonic, rather than the lowest currently sounding note, is used as the Just Intonation tuning root. Brief or ambiguous passages can still produce uncertain estimates, so the confidence gap remains visible in the diagnostics.
+
+Example output:
+
+```text
+diagnostics:
+  input: /path/to/Music/pachelbel_canon_and_gigue_(c)icking-archive.mid
+  duration: 433.00s
+  note-ons: 3032
+  note-offs: 3036
+  maximum simultaneous voices: 4
+  key changes:
+        1.50s  D major   active voices:  1  confidence gap: 0.46
+       18.00s  B minor   active voices:  2  confidence gap: 1.49
+       24.00s  D major   active voices:  3  confidence gap: 1.65
+```
+
+Diagnostics from the Pachelbel test render are kept in `diagnostics/pachelbel-diagnostics.log`. This is an example artifact rather than required application input.
 
 ---
 
@@ -172,3 +251,30 @@ private:
 * **Phase 2 (Dynamic Engine):** Implementation of the `HarmonicSolver` root-detection algorithm and real-time frequency smoothing to eliminate pitch clicks.
 * **Phase 3 (Chiptune Synthesis):** NES pulse/triangle wave generation with simple ADSR, bandlimited synthesis (BLEP) to eliminate aliasing.
 * **Phase 4 (UI & Host Integration):** Waveform visualization, tuning offset display (cents shift indicator), and optional plugin wrappers (VST3/CLAP).
+
+## Phase 1 Rust Proof of Concept
+
+The first local implementation is a dependency-free Rust command-line renderer. It provides deterministic sine-wave synthesis with short attack/release ramps, polyphonic note tracking, 12-TET MIDI frequency conversion, a minimal Standard MIDI File parser (format 0/1, tempo changes, and note events), diagnostic output with active-voice statistics and heuristic key-change detection, and mono 16-bit PCM WAV output.
+
+```sh
+cargo check
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo test <test_name_substring>
+cargo run -- demo demo.wav 2
+cargo run -- render input.mid output.wav
+```
+
+The renderer is intentionally offline; live MIDI devices and real-time audio backends are planned for later phases. The core synthesis and MIDI modules are kept independent of audio hardware so they can be tested deterministically.
+
+### Current source layout
+
+The implementation is organized around a small dependency-free Cargo crate:
+
+- `src/midi.rs` parses supported MIDI events and converts ticks to seconds.
+- `src/synth.rs` tracks voices and renders sine samples with short attack/release ramps.
+- `src/diagnostics.rs` analyzes polyphony and estimates key movement for terminal output.
+- `src/tuning.rs` maps the detected key and active notes to Just Intonation target frequencies.
+- `src/wav.rs` writes mono 16-bit PCM WAV files.
+- `src/main.rs` provides the `demo` and `render` commands.

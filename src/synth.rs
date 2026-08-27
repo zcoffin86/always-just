@@ -1,0 +1,267 @@
+use std::collections::HashMap;
+
+use crate::tuning::target_frequency;
+use crate::{
+    diagnostics::KeyDetector,
+    midi::{MidiEvent, MidiKind},
+    midi_note_frequency, SAMPLE_RATE,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub struct ActiveNote {
+    pub channel: u8,
+    pub note: u8,
+    pub velocity: f32,
+}
+
+#[derive(Default)]
+pub struct NoteTracker {
+    notes: HashMap<(u8, u8), ActiveNote>,
+}
+
+impl NoteTracker {
+    pub fn handle(&mut self, event: MidiEvent) {
+        match event.kind {
+            MidiKind::NoteOn { note, velocity } => {
+                if velocity > 0 {
+                    self.notes.insert(
+                        (event.channel, note),
+                        ActiveNote {
+                            channel: event.channel,
+                            note,
+                            velocity: f32::from(velocity) / 127.0,
+                        },
+                    );
+                } else {
+                    self.notes.remove(&(event.channel, note));
+                }
+            }
+            MidiKind::NoteOff { note } => {
+                self.notes.remove(&(event.channel, note));
+            }
+        }
+    }
+
+    pub fn active(&self) -> impl Iterator<Item = ActiveNote> + '_ {
+        self.notes.values().copied()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Voice {
+    channel: u8,
+    note: u8,
+    phase: f32,
+    frequency: f32,
+    target_frequency: f32,
+    amplitude: f32,
+    level: f32,
+    state: VoiceState,
+    release_samples: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoiceState {
+    Attacking,
+    Sustaining,
+    Releasing,
+}
+
+pub struct Synthesizer {
+    voices: Vec<Voice>,
+    sample_rate: f32,
+    attack_samples: usize,
+    release_samples: usize,
+    smoothing_alpha: f32,
+}
+
+impl Synthesizer {
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            voices: Vec::new(),
+            sample_rate: sample_rate as f32,
+            attack_samples: ((sample_rate as f32 * 0.005).round() as usize).max(1),
+            release_samples: ((sample_rate as f32 * 0.01).round() as usize).max(1),
+            smoothing_alpha: 1.0 - (-1.0 / (sample_rate as f32 * 0.015)).exp(),
+        }
+    }
+
+    pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
+        self.voices
+            .retain(|voice| (voice.channel, voice.note) != (channel, note));
+        self.voices.push(Voice {
+            channel,
+            note,
+            phase: 0.0,
+            frequency: midi_note_frequency(note),
+            target_frequency: midi_note_frequency(note),
+            amplitude: f32::from(velocity) / 127.0 * 0.2,
+            level: 0.0,
+            state: VoiceState::Attacking,
+            release_samples: 0,
+        });
+    }
+
+    pub fn note_off(&mut self, channel: u8, note: u8) {
+        for voice in &mut self.voices {
+            if (voice.channel, voice.note) == (channel, note)
+                && voice.state != VoiceState::Releasing
+            {
+                voice.state = VoiceState::Releasing;
+                voice.release_samples = self.release_samples;
+            }
+        }
+    }
+
+    fn apply_key(&mut self, key: Option<crate::diagnostics::DetectedKey>) -> f32 {
+        let Some(key) = key else {
+            return 0.0;
+        };
+        let mut maximum: f32 = 0.0;
+        for voice in &mut self.voices {
+            if voice.state == VoiceState::Releasing {
+                continue;
+            }
+            let tuned = target_frequency(key, voice.note);
+            voice.target_frequency = tuned.frequency;
+            maximum = maximum.max(tuned.cents_offset.abs());
+        }
+        maximum
+    }
+
+    pub fn render(&mut self, frames: usize) -> Vec<f32> {
+        let mut output = vec![0.0; frames];
+        for sample in &mut output {
+            for voice in &mut self.voices {
+                voice.frequency +=
+                    (voice.target_frequency - voice.frequency) * self.smoothing_alpha;
+                match voice.state {
+                    VoiceState::Attacking => {
+                        voice.level = (voice.level + 1.0 / self.attack_samples as f32).min(1.0);
+                        if voice.level >= 1.0 {
+                            voice.state = VoiceState::Sustaining;
+                        }
+                    }
+                    VoiceState::Sustaining => {}
+                    VoiceState::Releasing => {
+                        voice.level = (voice.level - 1.0 / self.release_samples as f32).max(0.0);
+                        voice.release_samples = voice.release_samples.saturating_sub(1);
+                    }
+                }
+                *sample +=
+                    (voice.phase * std::f32::consts::TAU).sin() * voice.amplitude * voice.level;
+                voice.phase = (voice.phase + voice.frequency / self.sample_rate) % 1.0;
+            }
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        self.voices
+            .retain(|voice| voice.state != VoiceState::Releasing || voice.level > 0.0);
+        output
+    }
+
+    pub fn render_events(events: &[MidiEvent], duration: f32) -> Vec<f32> {
+        Self::render_events_with_report(events, duration).0
+    }
+
+    pub fn render_events_with_report(
+        events: &[MidiEvent],
+        duration: f32,
+    ) -> (Vec<f32>, RenderReport) {
+        let mut synth = Self::new(SAMPLE_RATE);
+        let mut detector = KeyDetector::default();
+        let mut report = RenderReport::default();
+        let total_frames = (duration.max(0.0) * SAMPLE_RATE as f32).ceil() as usize;
+        let mut output = Vec::with_capacity(total_frames);
+        let mut event_index = 0;
+        for frame in 0..total_frames {
+            let time = frame as f32 / SAMPLE_RATE as f32;
+            while let Some(event) = events.get(event_index).filter(|event| event.time <= time) {
+                match event.kind {
+                    MidiKind::NoteOn { note, velocity } => {
+                        synth.note_on(event.channel, note, velocity);
+                        if velocity > 0 {
+                            detector.update(event.time, [(note, velocity)]);
+                        }
+                    }
+                    MidiKind::NoteOff { note } => synth.note_off(event.channel, note),
+                }
+                report.max_tuning_offset_cents = report
+                    .max_tuning_offset_cents
+                    .max(synth.apply_key(detector.current()));
+                event_index += 1;
+            }
+            output.extend(synth.render(1));
+        }
+        (output, report)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderReport {
+    pub max_tuning_offset_cents: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracks_note_on_and_off() {
+        let mut tracker = NoteTracker::default();
+        tracker.handle(MidiEvent {
+            time: 0.0,
+            channel: 2,
+            kind: MidiKind::NoteOn {
+                note: 60,
+                velocity: 127,
+            },
+        });
+        assert_eq!(tracker.active().count(), 1);
+        tracker.handle(MidiEvent {
+            time: 1.0,
+            channel: 2,
+            kind: MidiKind::NoteOff { note: 60 },
+        });
+        assert_eq!(tracker.active().count(), 0);
+    }
+
+    #[test]
+    fn renders_a_non_silent_sine_wave() {
+        let events = [MidiEvent {
+            time: 0.0,
+            channel: 0,
+            kind: MidiKind::NoteOn {
+                note: 69,
+                velocity: 127,
+            },
+        }];
+        let samples = Synthesizer::render_events(&events, 0.01);
+        assert_eq!(samples.len(), 441);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.01));
+    }
+
+    #[test]
+    fn ramps_voice_changes_instead_of_jumping() {
+        let events = [
+            MidiEvent {
+                time: 0.0,
+                channel: 0,
+                kind: MidiKind::NoteOn {
+                    note: 60,
+                    velocity: 127,
+                },
+            },
+            MidiEvent {
+                time: 0.01,
+                channel: 0,
+                kind: MidiKind::NoteOff { note: 60 },
+            },
+        ];
+        let samples = Synthesizer::render_events(&events, 0.02);
+        let largest_step = samples
+            .windows(2)
+            .map(|window| (window[1] - window[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(largest_step < 0.02);
+    }
+}

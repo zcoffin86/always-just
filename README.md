@@ -6,12 +6,12 @@ The project is intentionally local for now. MIDI and WAV files can live in a loc
 
 ## Quick Start
 
-Install Rust and Cargo, plus the native build tools required by Rust's target platform. These tools are not Rust crate dependencies, but they are typical for Rust applications that produce native executables: Cargo invokes the platform linker during `cargo build`, `cargo run`, and test execution. On Linux this usually means a C compiler driver such as `cc` or `gcc`; macOS requires Apple's Xcode Command Line Tools; Windows requires the MSVC or GNU build tools appropriate to the selected Rust toolchain.
+Install Rust and Cargo, plus the native build tools required by Rust's target platform. These tools are not Rust crate dependencies, but they are typical for Rust applications that produce native executables: Cargo invokes the platform linker during `cargo build`, `cargo run`, and test execution. On Linux this usually means a C compiler driver such as `cc` or `gcc`, `pkg-config`, and ALSA development headers for real-time MIDI/audio support; macOS requires Apple's Xcode Command Line Tools; Windows requires the MSVC or GNU build tools appropriate to the selected Rust toolchain.
 
 For Debian or Ubuntu:
 
 ```sh
-sudo apt install build-essential
+sudo apt install build-essential pkg-config libasound2-dev
 ```
 
 For Fedora:
@@ -45,6 +45,27 @@ cargo run -- render \
 ```
 
 The `render` command prints diagnostics to the terminal before writing the WAV. The output file is mono, 16-bit PCM at 44.1 kHz.
+
+To use a connected MIDI keyboard with the default audio output:
+
+```sh
+cargo run -- realtime "PSR-295/293"
+```
+
+The optional argument is a substring of the MIDI input port name. Omit it to use the first available MIDI input. The command prints the selected MIDI port and audio output device, responds to MIDI note-on and note-off messages, and waits for Enter before stopping.
+
+The real-time path requests a 256-frame output buffer (about 5.8 ms at 44.1 kHz). MIDI callbacks enqueue events into a bounded queue, while the audio callback owns and renders the synthesizer without taking a mutex or allocating a sample buffer on every callback. A slightly larger buffer is intentional: very small ALSA buffers can reduce latency but are more likely to underrun on systems whose audio scheduler cannot reliably service them.
+
+While playing, each MIDI note change also prints the current detected key and the tuning applied to every active note:
+
+```text
+MIDI update: key=D major, voices=3
+  ch  1 note  62:   293.66 Hz (+0.00 cents)
+  ch  1 note  66:   366.96 Hz (-13.69 cents)
+  ch  1 note  69:   440.00 Hz (+1.96 cents)
+```
+
+For visual verification, use the offline renderer to create a WAV, then open it in an audio editor such as Audacity. The waveform view can reveal clicks or discontinuities; a spectrogram or spectrum view can show the sine partials and frequency movement. Real-time terminal diagnostics confirm the MIDI events and tuning decisions but cannot display the audio waveform itself.
 
 ### Finding MIDI test files
 

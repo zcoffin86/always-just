@@ -1,6 +1,6 @@
 use std::{env, error::Error, process};
 
-use aways_just::{diagnostics, midi, synth::Synthesizer, wav, SAMPLE_RATE};
+use aways_just::{diagnostics, midi, realtime, synth::Synthesizer, wav, SAMPLE_RATE};
 
 fn print_diagnostics(path: &str, events: &[midi::MidiEvent], duration: f32) {
     let analysis = diagnostics::analyze(events);
@@ -25,6 +25,7 @@ fn print_diagnostics(path: &str, events: &[midi::MidiEvent], duration: f32) {
 fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("realtime") if args.len() <= 3 => realtime::run(args.get(2).map(String::as_str)),
         Some("render") if args.len() == 4 => {
             let events = midi::read_file(&args[2])?;
             let duration = events.iter().map(|event| event.time).fold(0.0_f32, f32::max) + 1.0;
@@ -52,7 +53,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("rendered {:.2}s demo to {}", duration, args[2]);
             Ok(())
         }
-        _ => Err("usage: aways-just demo <output.wav> [seconds]\n       aways-just render <input.mid> <output.wav>".into()),
+        _ => Err("usage: aways-just demo <output.wav> [seconds]\n       aways-just render <input.mid> <output.wav>\n       aways-just realtime [midi-port-filter]".into()),
     }
 }
 

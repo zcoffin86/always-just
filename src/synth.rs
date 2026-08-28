@@ -73,6 +73,7 @@ pub struct Synthesizer {
     attack_samples: usize,
     release_samples: usize,
     smoothing_alpha: f32,
+    detector: KeyDetector,
 }
 
 impl Synthesizer {
@@ -83,6 +84,7 @@ impl Synthesizer {
             attack_samples: ((sample_rate as f32 * 0.005).round() as usize).max(1),
             release_samples: ((sample_rate as f32 * 0.01).round() as usize).max(1),
             smoothing_alpha: 1.0 - (-1.0 / (sample_rate as f32 * 0.015)).exp(),
+            detector: KeyDetector::default(),
         }
     }
 
@@ -113,6 +115,52 @@ impl Synthesizer {
         }
     }
 
+    pub fn handle_midi_event(&mut self, event: MidiEvent) -> TuningDiagnostic {
+        match event.kind {
+            MidiKind::NoteOn { note, velocity } => {
+                self.note_on(event.channel, note, velocity);
+                if velocity > 0 {
+                    self.detector.update_active(
+                        event.time,
+                        [(note, velocity)],
+                        self.voices
+                            .iter()
+                            .filter(|voice| voice.state != VoiceState::Releasing)
+                            .map(|voice| voice.note),
+                    );
+                }
+            }
+            MidiKind::NoteOff { note } => {
+                self.note_off(event.channel, note);
+                self.detector.update_active(
+                    event.time,
+                    [],
+                    self.voices
+                        .iter()
+                        .filter(|voice| voice.state != VoiceState::Releasing)
+                        .map(|voice| voice.note),
+                );
+            }
+        }
+        self.apply_key(self.detector.current());
+        let key = self.detector.current();
+        let notes = self
+            .voices
+            .iter()
+            .filter(|voice| voice.state != VoiceState::Releasing)
+            .map(|voice| {
+                let tuned = key.map(|key| target_frequency(key, voice.note));
+                TuningNote {
+                    channel: voice.channel,
+                    note: voice.note,
+                    frequency: tuned.map_or(voice.frequency, |value| value.frequency),
+                    cents_offset: tuned.map_or(0.0, |value| value.cents_offset),
+                }
+            })
+            .collect();
+        TuningDiagnostic { key, notes }
+    }
+
     fn apply_key(&mut self, key: Option<crate::diagnostics::DetectedKey>) -> f32 {
         let Some(key) = key else {
             return 0.0;
@@ -131,32 +179,40 @@ impl Synthesizer {
 
     pub fn render(&mut self, frames: usize) -> Vec<f32> {
         let mut output = vec![0.0; frames];
-        for sample in &mut output {
-            for voice in &mut self.voices {
-                voice.frequency +=
-                    (voice.target_frequency - voice.frequency) * self.smoothing_alpha;
-                match voice.state {
-                    VoiceState::Attacking => {
-                        voice.level = (voice.level + 1.0 / self.attack_samples as f32).min(1.0);
-                        if voice.level >= 1.0 {
-                            voice.state = VoiceState::Sustaining;
-                        }
-                    }
-                    VoiceState::Sustaining => {}
-                    VoiceState::Releasing => {
-                        voice.level = (voice.level - 1.0 / self.release_samples as f32).max(0.0);
-                        voice.release_samples = voice.release_samples.saturating_sub(1);
+        self.render_into(&mut output);
+        output
+    }
+
+    pub fn render_into(&mut self, output: &mut [f32]) {
+        output.fill(0.0);
+        for sample in output.iter_mut() {
+            *sample = self.render_sample();
+        }
+    }
+
+    pub fn render_sample(&mut self) -> f32 {
+        let mut sample = 0.0;
+        for voice in &mut self.voices {
+            voice.frequency += (voice.target_frequency - voice.frequency) * self.smoothing_alpha;
+            match voice.state {
+                VoiceState::Attacking => {
+                    voice.level = (voice.level + 1.0 / self.attack_samples as f32).min(1.0);
+                    if voice.level >= 1.0 {
+                        voice.state = VoiceState::Sustaining;
                     }
                 }
-                *sample +=
-                    (voice.phase * std::f32::consts::TAU).sin() * voice.amplitude * voice.level;
-                voice.phase = (voice.phase + voice.frequency / self.sample_rate) % 1.0;
+                VoiceState::Sustaining => {}
+                VoiceState::Releasing => {
+                    voice.level = (voice.level - 1.0 / self.release_samples as f32).max(0.0);
+                    voice.release_samples = voice.release_samples.saturating_sub(1);
+                }
             }
-            *sample = sample.clamp(-1.0, 1.0);
+            sample += (voice.phase * std::f32::consts::TAU).sin() * voice.amplitude * voice.level;
+            voice.phase = (voice.phase + voice.frequency / self.sample_rate) % 1.0;
         }
         self.voices
             .retain(|voice| voice.state != VoiceState::Releasing || voice.level > 0.0);
-        output
+        sample.clamp(-1.0, 1.0)
     }
 
     pub fn render_events(events: &[MidiEvent], duration: f32) -> Vec<f32> {
@@ -199,6 +255,20 @@ impl Synthesizer {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderReport {
     pub max_tuning_offset_cents: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct TuningDiagnostic {
+    pub key: Option<crate::diagnostics::DetectedKey>,
+    pub notes: Vec<TuningNote>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TuningNote {
+    pub channel: u8,
+    pub note: u8,
+    pub frequency: f32,
+    pub cents_offset: f32,
 }
 
 #[cfg(test)]

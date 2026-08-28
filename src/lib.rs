@@ -1,5 +1,6 @@
 pub mod diagnostics;
 pub mod midi;
+pub mod realtime;
 pub mod synth;
 pub mod tuning;
 pub mod wav;

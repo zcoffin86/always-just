@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Offline proof-of-concept synthesizer for Always Just"
 
+[dependencies]
+cpal = "0.15"
+midir = "0.10"
+
 [lib]
 name = "aways_just"
 path = "src/lib.rs"

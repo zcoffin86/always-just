@@ -13,6 +13,7 @@ const MAJOR_PROFILE: [f32; 12] = [
 const MINOR_PROFILE: [f32; 12] = [
     6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
 ];
+const HISTORY_HALF_LIFE_SECONDS: f32 = 1.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyMode {
@@ -37,7 +38,7 @@ pub struct KeyDetector {
 impl KeyDetector {
     pub fn update(&mut self, time: f32, events: impl IntoIterator<Item = (u8, u8)>) {
         let elapsed = (time - self.last_time).max(0.0);
-        let decay = 0.5_f32.powf(elapsed / 12.0);
+        let decay = 0.5_f32.powf(elapsed / HISTORY_HALF_LIFE_SECONDS);
         self.history.iter_mut().for_each(|weight| *weight *= decay);
         for (note, velocity) in events {
             self.history[usize::from(note % 12)] += f32::from(velocity) / 127.0;
@@ -48,6 +49,28 @@ impl KeyDetector {
             self.current = key;
         }
         self.last_time = time;
+    }
+
+    pub fn update_active(
+        &mut self,
+        time: f32,
+        events: impl IntoIterator<Item = (u8, u8)>,
+        active_notes: impl IntoIterator<Item = u8>,
+    ) {
+        self.update(time, events);
+        let mut active_pitch_classes = [0.0_f32; 12];
+        let mut active_count = 0;
+        for note in active_notes {
+            active_pitch_classes[usize::from(note % 12)] += 1.0;
+            active_count += 1;
+        }
+        if active_count >= 3 {
+            let (key, confidence) = detect_key(active_pitch_classes);
+            if confidence >= 0.05 {
+                self.current = key;
+                self.confidence = confidence;
+            }
+        }
     }
 
     pub fn current(&self) -> Option<DetectedKey> {
@@ -111,7 +134,7 @@ pub fn analyze(events: &[MidiEvent]) -> Analysis {
         max_polyphony = max_polyphony.max(active.len());
 
         let previous_key = detector.current();
-        detector.update(time, new_notes);
+        detector.update_active(time, new_notes, active.keys().map(|(_, note)| *note));
         let key = detector.current();
         if key != current_key && key != previous_key {
             if let Some(key) = key {
@@ -183,6 +206,27 @@ mod tests {
             key,
             Some(DetectedKey {
                 root: 0,
+                mode: KeyMode::Major
+            })
+        );
+    }
+
+    #[test]
+    fn follows_successive_chord_roots_without_long_history_lag() {
+        let mut detector = KeyDetector::default();
+        detector.update_active(0.0, [(55, 100), (59, 100), (62, 100)], [55, 59, 62]);
+        assert_eq!(
+            detector.current(),
+            Some(DetectedKey {
+                root: 7,
+                mode: KeyMode::Major
+            })
+        );
+        detector.update_active(0.5, [(50, 100), (54, 100), (57, 100)], [50, 54, 57]);
+        assert_eq!(
+            detector.current(),
+            Some(DetectedKey {
+                root: 2,
                 mode: KeyMode::Major
             })
         );

@@ -13,6 +13,8 @@ const MAJOR_PROFILE: [f32; 12] = [
 const MINOR_PROFILE: [f32; 12] = [
     6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
 ];
+const KEY_SWITCH_MARGIN: f32 = 0.5;
+const ANCHORED_KEY_SWITCH_MARGIN: f32 = 2.5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyMode {
     Major,
@@ -38,20 +40,32 @@ impl KeyDetector {
         _events: impl IntoIterator<Item = (u8, u8)>,
         active_notes: impl IntoIterator<Item = u8>,
     ) {
-        let mut active_pitch_classes = [0.0_f32; 12];
-        let mut active_count = 0;
-        for note in active_notes {
-            active_pitch_classes[usize::from(note % 12)] += 1.0;
-            active_count += 1;
-        }
-        if active_count < 2 {
+        let active_notes: Vec<u8> = active_notes.into_iter().collect();
+        if active_notes.len() < 2 {
             self.current = None;
             self.confidence = 0.0;
             return;
         }
-        let (key, confidence) = detect_key(active_pitch_classes);
-        self.current = key;
-        self.confidence = confidence;
+        let (candidate, confidence, candidate_score) = detect_key_from_notes(&active_notes);
+        let should_switch = match (self.current, candidate) {
+            (Some(current), Some(candidate)) if current != candidate => {
+                let margin = if active_notes
+                    .iter()
+                    .min()
+                    .is_some_and(|note| note % 12 == current.root)
+                {
+                    ANCHORED_KEY_SWITCH_MARGIN
+                } else {
+                    KEY_SWITCH_MARGIN
+                };
+                candidate_score - key_score_from_notes(&active_notes, current) >= margin
+            }
+            _ => true,
+        };
+        if should_switch {
+            self.current = candidate;
+            self.confidence = confidence;
+        }
     }
 
     pub fn current(&self) -> Option<DetectedKey> {
@@ -133,43 +147,69 @@ pub fn analyze(events: &[MidiEvent]) -> Analysis {
     }
 }
 
-fn detect_key(pitch_classes: [f32; 12]) -> (Option<DetectedKey>, f32) {
+fn detect_key_from_notes(notes: &[u8]) -> (Option<DetectedKey>, f32, f32) {
+    let pitch_classes = pitch_classes_from_notes(notes);
     if pitch_classes.iter().all(|weight| *weight == 0.0) {
-        return (None, 0.0);
+        return (None, 0.0, 0.0);
     }
 
-    let mut best = (
-        DetectedKey {
-            root: 0,
-            mode: KeyMode::Major,
-        },
-        f32::NEG_INFINITY,
-    );
+    let mut best = None;
     let mut second = f32::NEG_INFINITY;
     for root in 0..12 {
         for mode in [KeyMode::Major, KeyMode::Minor] {
-            let profile = match mode {
-                KeyMode::Major => MAJOR_PROFILE,
-                KeyMode::Minor => MINOR_PROFILE,
+            let key = DetectedKey {
+                root: root as u8,
+                mode,
             };
-            let score = (0..12)
-                .map(|interval| pitch_classes[(root + interval) % 12] * profile[interval])
-                .sum();
-            if score > best.1 {
-                second = best.1;
-                best = (
-                    DetectedKey {
-                        root: root as u8,
-                        mode,
-                    },
-                    score,
-                );
-            } else if score > second {
-                second = score;
+            let score = key_score_from_notes(notes, key);
+            if best.is_none_or(|(_, best_score)| score > best_score) {
+                if let Some((_, best_score)) = best {
+                    second = second.max(best_score);
+                }
+                best = Some((key, score));
+            } else {
+                second = second.max(score);
             }
         }
     }
-    (Some(best.0), best.1 - second)
+    let (key, score) = best.expect("non-empty note set produces a key candidate");
+    (Some(key), score - second, score)
+}
+
+fn pitch_classes_from_notes(notes: &[u8]) -> [f32; 12] {
+    let mut pitch_classes = [0.0_f32; 12];
+    for &note in notes {
+        pitch_classes[usize::from(note % 12)] += 1.0;
+    }
+    pitch_classes
+}
+
+fn key_score_from_notes(notes: &[u8], key: DetectedKey) -> f32 {
+    let pitch_classes = pitch_classes_from_notes(notes);
+    let mut score = key_score(pitch_classes, key);
+    let bass = *notes.iter().min().expect("key scoring requires notes");
+    if bass % 12 == key.root {
+        score += 2.0;
+    }
+    for &note in notes {
+        let interval = (i16::from(note) - i16::from(bass)).rem_euclid(12);
+        let profile = match key.mode {
+            KeyMode::Major => MAJOR_PROFILE,
+            KeyMode::Minor => MINOR_PROFILE,
+        };
+        score += profile[interval as usize] * 0.05;
+    }
+    score
+}
+
+fn key_score(pitch_classes: [f32; 12], key: DetectedKey) -> f32 {
+    let profile = match key.mode {
+        KeyMode::Major => MAJOR_PROFILE,
+        KeyMode::Minor => MINOR_PROFILE,
+    };
+    (0..12)
+        .map(|interval| pitch_classes[(usize::from(key.root) + interval) % 12] * profile[interval])
+        .sum()
 }
 
 #[cfg(test)]
@@ -178,11 +218,7 @@ mod tests {
 
     #[test]
     fn identifies_a_major_triad() {
-        let mut pitch_classes = [0.0; 12];
-        pitch_classes[0] = 1.0;
-        pitch_classes[4] = 1.0;
-        pitch_classes[7] = 1.0;
-        let (key, _) = detect_key(pitch_classes);
+        let (key, _, _) = detect_key_from_notes(&[60, 64, 67]);
         assert_eq!(
             key,
             Some(DetectedKey {
@@ -250,5 +286,63 @@ mod tests {
         assert_eq!(detector.current(), None);
         detector.update_active(0.1, [], [64]);
         assert_eq!(detector.current(), None);
+    }
+
+    #[test]
+    fn retains_existing_key_without_a_meaningful_score_advantage() {
+        let mut detector = KeyDetector::default();
+        detector.update_active(0.0, [], [60, 64]);
+        detector.update_active(0.1, [], [60, 64, 68]);
+        assert_eq!(
+            detector.current(),
+            Some(DetectedKey {
+                root: 0,
+                mode: KeyMode::Major
+            })
+        );
+    }
+
+    #[test]
+    fn sustained_current_tonic_anchors_key_selection() {
+        let mut detector = KeyDetector::default();
+        detector.update_active(0.0, [], [55, 59, 62]);
+        assert_eq!(
+            detector.current(),
+            Some(DetectedKey {
+                root: 7,
+                mode: KeyMode::Major
+            })
+        );
+
+        detector.update_active(0.1, [], [55, 69, 77]);
+        assert_eq!(
+            detector.current(),
+            Some(DetectedKey {
+                root: 7,
+                mode: KeyMode::Major
+            })
+        );
+    }
+
+    #[test]
+    fn octave_register_and_lowest_note_influence_active_key_selection() {
+        let mut detector = KeyDetector::default();
+        detector.update_active(0.0, [], [36, 43]);
+        assert_eq!(
+            detector.current(),
+            Some(DetectedKey {
+                root: 0,
+                mode: KeyMode::Major
+            })
+        );
+
+        detector.update_active(0.1, [], [43, 48]);
+        assert_eq!(
+            detector.current(),
+            Some(DetectedKey {
+                root: 7,
+                mode: KeyMode::Major
+            })
+        );
     }
 }

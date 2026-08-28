@@ -29,13 +29,25 @@ fn print_diagnostics(path: &str, events: &[midi::MidiEvent], duration: f32) {
 fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("realtime") if (2..=4).contains(&args.len()) => {
+        Some("realtime") if (2..=5).contains(&args.len()) => {
             let waveform = args
                 .get(3)
                 .map(|value| Waveform::parse(value).ok_or_else(|| format!("unknown waveform: {value}")))
                 .transpose()?
                 .unwrap_or_default();
-            realtime::run(args.get(2).map(String::as_str), waveform)
+            let buffer_frames = args
+                .get(4)
+                .map(|value| {
+                    let frames = value
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid audio buffer size: {value}"))?;
+                    (frames > 0)
+                        .then_some(frames)
+                        .ok_or_else(|| "audio buffer size must be greater than zero".to_owned())
+                })
+                .transpose()?
+                .unwrap_or(realtime::DEFAULT_BUFFER_FRAMES);
+            realtime::run(args.get(2).map(String::as_str), waveform, buffer_frames)
         }
         Some("render") if (4..=5).contains(&args.len()) => {
             let events = midi::read_file(&args[2])?;
@@ -72,7 +84,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("rendered {:.2}s demo to {}", duration, args[2]);
             Ok(())
         }
-        _ => Err("usage: aways-just demo <output.wav> [seconds]\n       aways-just render <input.mid> <output.wav> [sine|square|saw|triangle|pwm]\n       aways-just realtime [midi-port-filter] [sine|square|saw|triangle|pwm]".into()),
+        _ => Err("usage: aways-just demo <output.wav> [seconds]\n       aways-just render <input.mid> <output.wav> [sine|square|saw|triangle|pwm]\n       aways-just realtime [midi-port-filter] [sine|square|saw|triangle|pwm] [buffer-frames]".into()),
     }
 }
 

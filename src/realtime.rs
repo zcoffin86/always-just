@@ -17,9 +17,13 @@ use crate::{
     synth::{Synthesizer, Waveform},
 };
 
-const LOW_LATENCY_BUFFER_FRAMES: u32 = 256;
+pub const DEFAULT_BUFFER_FRAMES: u32 = 256;
 
-pub fn run(port_filter: Option<&str>, waveform: Waveform) -> Result<(), Box<dyn Error>> {
+pub fn run(
+    port_filter: Option<&str>,
+    waveform: Waveform,
+    buffer_frames: u32,
+) -> Result<(), Box<dyn Error>> {
     let mut midi = MidiInput::new("aways-just")?;
     midi.ignore(Ignore::None);
     let ports = midi.ports();
@@ -68,7 +72,7 @@ pub fn run(port_filter: Option<&str>, waveform: Waveform) -> Result<(), Box<dyn 
     let config = StreamConfig {
         channels: supported.channels(),
         sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Fixed(LOW_LATENCY_BUFFER_FRAMES),
+        buffer_size: cpal::BufferSize::Fixed(buffer_frames),
     };
     let channels = usize::from(config.channels);
     let stream = build_stream_for_format(
@@ -90,10 +94,10 @@ pub fn run(port_filter: Option<&str>, waveform: Waveform) -> Result<(), Box<dyn 
         config.channels,
         config.sample_rate.0
     );
-    if config.buffer_size == cpal::BufferSize::Fixed(LOW_LATENCY_BUFFER_FRAMES) {
+    if config.buffer_size == cpal::BufferSize::Fixed(buffer_frames) {
         println!(
-            "audio buffer: {LOW_LATENCY_BUFFER_FRAMES} frames ({:.1} ms)",
-            1000.0 * f64::from(LOW_LATENCY_BUFFER_FRAMES) / f64::from(sample_rate)
+            "audio buffer: {buffer_frames} frames ({:.1} ms)",
+            1000.0 * f64::from(buffer_frames) / f64::from(sample_rate)
         );
     } else {
         println!("audio buffer: device default (low-latency request was not accepted)");

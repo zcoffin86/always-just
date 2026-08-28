@@ -14,12 +14,12 @@ use midir::{Ignore, MidiInput};
 
 use crate::{
     midi::{MidiEvent, MidiKind},
-    synth::Synthesizer,
+    synth::{Synthesizer, Waveform},
 };
 
 const LOW_LATENCY_BUFFER_FRAMES: u32 = 256;
 
-pub fn run(port_filter: Option<&str>) -> Result<(), Box<dyn Error>> {
+pub fn run(port_filter: Option<&str>, waveform: Waveform) -> Result<(), Box<dyn Error>> {
     let mut midi = MidiInput::new("aways-just")?;
     midi.ignore(Ignore::None);
     let ports = midi.ports();
@@ -77,11 +77,13 @@ pub fn run(port_filter: Option<&str>) -> Result<(), Box<dyn Error>> {
         channels,
         midi_receiver,
         diagnostic_sender,
+        waveform,
         supported.sample_format(),
     )?;
     stream.play()?;
 
     println!("MIDI input: {port_name}");
+    println!("waveform: {}", waveform_name(waveform));
     println!(
         "audio output: {} ({} channels at {} Hz)",
         device.name().unwrap_or_else(|_| "unknown".into()),
@@ -149,11 +151,12 @@ fn build_stream<T>(
     channels: usize,
     midi_receiver: Receiver<MidiEvent>,
     diagnostic_sender: SyncSender<crate::synth::TuningDiagnostic>,
+    waveform: Waveform,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: Sample + SizedSample + FromSample<f32>,
 {
-    let mut synth = Synthesizer::new(config.sample_rate.0);
+    let mut synth = Synthesizer::with_waveform(config.sample_rate.0, waveform);
     device.build_output_stream(
         config,
         move |output: &mut [T], _| {
@@ -180,18 +183,44 @@ fn build_stream_for_format(
     channels: usize,
     midi_receiver: Receiver<MidiEvent>,
     diagnostic_sender: SyncSender<crate::synth::TuningDiagnostic>,
+    waveform: Waveform,
     format: SampleFormat,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     match format {
-        SampleFormat::F32 => {
-            build_stream::<f32>(device, config, channels, midi_receiver, diagnostic_sender)
-        }
-        SampleFormat::I16 => {
-            build_stream::<i16>(device, config, channels, midi_receiver, diagnostic_sender)
-        }
-        SampleFormat::U16 => {
-            build_stream::<u16>(device, config, channels, midi_receiver, diagnostic_sender)
-        }
+        SampleFormat::F32 => build_stream::<f32>(
+            device,
+            config,
+            channels,
+            midi_receiver,
+            diagnostic_sender,
+            waveform,
+        ),
+        SampleFormat::I16 => build_stream::<i16>(
+            device,
+            config,
+            channels,
+            midi_receiver,
+            diagnostic_sender,
+            waveform,
+        ),
+        SampleFormat::U16 => build_stream::<u16>(
+            device,
+            config,
+            channels,
+            midi_receiver,
+            diagnostic_sender,
+            waveform,
+        ),
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+    }
+}
+
+fn waveform_name(waveform: Waveform) -> &'static str {
+    match waveform {
+        Waveform::Sine => "sine",
+        Waveform::Square => "square",
+        Waveform::Saw => "saw",
+        Waveform::Triangle => "triangle",
+        Waveform::Pwm => "pwm",
     }
 }

@@ -52,7 +52,16 @@ To use a connected MIDI keyboard with the default audio output:
 cargo run -- realtime "PSR-295/293"
 ```
 
-The optional argument is a substring of the MIDI input port name. Omit it to use the first available MIDI input. The command prints the selected MIDI port and audio output device, responds to MIDI note-on and note-off messages, and waits for Enter before stopping.
+The first optional argument is a substring of the MIDI input port name. The second optional argument selects the oscillator waveform:
+
+```sh
+cargo run -- realtime "PSR-295/293" square
+cargo run -- realtime "PSR-295/293" saw
+cargo run -- realtime "PSR-295/293" triangle
+cargo run -- realtime "PSR-295/293" pwm
+```
+
+Available waveforms are `sine`, `square`, `saw`, `triangle`, and `pwm` (a fixed 25% pulse-width waveform). Omit the port filter to use the first available MIDI input. The command prints the selected MIDI port and audio output device, responds to MIDI note-on and note-off messages, and waits for Enter before stopping.
 
 The real-time path requests a 256-frame output buffer (about 5.8 ms at 44.1 kHz). MIDI callbacks enqueue events into a bounded queue, while the audio callback owns and renders the synthesizer without taking a mutex or allocating a sample buffer on every callback. A slightly larger buffer is intentional: very small ALSA buffers can reduce latency but are more likely to underrun on systems whose audio scheduler cannot reliably service them.
 
@@ -81,7 +90,7 @@ For each MIDI render, the application reports:
 - Heuristic key changes with timestamps
 - Active voice count and a confidence gap for each key estimate
 
-Key detection uses a decaying history of recent pitch classes and compares it with major/minor tonal profiles. The detected key's tonic, rather than the lowest currently sounding note, is used as the Just Intonation tuning root. Brief or ambiguous passages can still produce uncertain estimates, so the confidence gap remains visible in the diagnostics.
+Key detection uses only the currently held pitch classes, so released notes stop influencing the result immediately. A single active note does not select a key and remains at 12-TET; Just Intonation adjustments engage only when at least two notes sound together. Major/minor tonal profiles are used to rank candidates. The detected key's tonic, rather than the lowest currently sounding note, is used as the Just Intonation tuning root. Brief or ambiguous passages can still produce uncertain estimates, so the confidence gap remains visible in the diagnostics.
 
 Example output:
 

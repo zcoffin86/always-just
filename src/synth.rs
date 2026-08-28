@@ -7,6 +7,51 @@ use crate::{
     midi_note_frequency, SAMPLE_RATE,
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Waveform {
+    #[default]
+    Sine,
+    Square,
+    Saw,
+    Triangle,
+    Pwm,
+}
+
+impl Waveform {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "sine" => Some(Self::Sine),
+            "square" | "pulse" => Some(Self::Square),
+            "saw" | "sawtooth" => Some(Self::Saw),
+            "triangle" | "tri" => Some(Self::Triangle),
+            "pwm" => Some(Self::Pwm),
+            _ => None,
+        }
+    }
+
+    fn sample(self, phase: f32) -> f32 {
+        match self {
+            Self::Sine => (phase * std::f32::consts::TAU).sin(),
+            Self::Square => {
+                if phase < 0.5 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+            Self::Saw => 2.0 * phase - 1.0,
+            Self::Triangle => 1.0 - 4.0 * (phase - 0.5).abs(),
+            Self::Pwm => {
+                if phase < 0.25 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ActiveNote {
     pub channel: u8,
@@ -70,6 +115,7 @@ enum VoiceState {
 pub struct Synthesizer {
     voices: Vec<Voice>,
     sample_rate: f32,
+    waveform: Waveform,
     attack_samples: usize,
     release_samples: usize,
     smoothing_alpha: f32,
@@ -78,14 +124,23 @@ pub struct Synthesizer {
 
 impl Synthesizer {
     pub fn new(sample_rate: u32) -> Self {
+        Self::with_waveform(sample_rate, Waveform::Sine)
+    }
+
+    pub fn with_waveform(sample_rate: u32, waveform: Waveform) -> Self {
         Self {
             voices: Vec::new(),
             sample_rate: sample_rate as f32,
+            waveform,
             attack_samples: ((sample_rate as f32 * 0.005).round() as usize).max(1),
             release_samples: ((sample_rate as f32 * 0.01).round() as usize).max(1),
             smoothing_alpha: 1.0 - (-1.0 / (sample_rate as f32 * 0.015)).exp(),
             detector: KeyDetector::default(),
         }
+    }
+
+    pub fn waveform(&self) -> Waveform {
+        self.waveform
     }
 
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
@@ -168,6 +223,11 @@ impl Synthesizer {
 
     fn apply_key(&mut self, key: Option<crate::diagnostics::DetectedKey>) -> f32 {
         let Some(key) = key else {
+            for voice in &mut self.voices {
+                if voice.state != VoiceState::Releasing {
+                    voice.target_frequency = midi_note_frequency(voice.note);
+                }
+            }
             return 0.0;
         };
         let mut maximum: f32 = 0.0;
@@ -212,7 +272,7 @@ impl Synthesizer {
                     voice.release_samples = voice.release_samples.saturating_sub(1);
                 }
             }
-            sample += (voice.phase * std::f32::consts::TAU).sin() * voice.amplitude * voice.level;
+            sample += self.waveform.sample(voice.phase) * voice.amplitude * voice.level;
             voice.phase = (voice.phase + voice.frequency / self.sample_rate) % 1.0;
         }
         self.voices
@@ -240,12 +300,18 @@ impl Synthesizer {
                 match event.kind {
                     MidiKind::NoteOn { note, velocity } => {
                         synth.note_on(event.channel, note, velocity);
-                        if velocity > 0 {
-                            detector.update(event.time, [(note, velocity)]);
-                        }
                     }
                     MidiKind::NoteOff { note } => synth.note_off(event.channel, note),
                 }
+                detector.update_active(
+                    event.time,
+                    [],
+                    synth
+                        .voices
+                        .iter()
+                        .filter(|voice| voice.state != VoiceState::Releasing)
+                        .map(|voice| voice.note),
+                );
                 report.max_tuning_offset_cents = report
                     .max_tuning_offset_cents
                     .max(synth.apply_key(detector.current()));
@@ -329,6 +395,15 @@ mod tests {
         });
         assert_eq!(diagnostic.notes.len(), 1);
         assert!((diagnostic.notes[0].velocity - 64.0 / 127.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn supports_non_sine_waveforms() {
+        let mut synth = Synthesizer::with_waveform(SAMPLE_RATE, Waveform::Square);
+        synth.note_on(0, 69, 127);
+        let samples = synth.render(500);
+        assert!(samples.iter().any(|sample| *sample > 0.1));
+        assert!(samples.iter().any(|sample| *sample < -0.1));
     }
 
     #[test]

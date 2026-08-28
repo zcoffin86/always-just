@@ -89,6 +89,10 @@ impl Synthesizer {
     }
 
     pub fn note_on(&mut self, channel: u8, note: u8, velocity: u8) {
+        if velocity == 0 {
+            self.note_off(channel, note);
+            return;
+        }
         self.voices
             .retain(|voice| (voice.channel, voice.note) != (channel, note));
         self.voices.push(Voice {
@@ -153,6 +157,7 @@ impl Synthesizer {
                 TuningNote {
                     channel: voice.channel,
                     note: voice.note,
+                    velocity: voice.amplitude / 0.2,
                     frequency: tuned.map_or(voice.frequency, |value| value.frequency),
                     cents_offset: tuned.map_or(0.0, |value| value.cents_offset),
                 }
@@ -267,6 +272,7 @@ pub struct TuningDiagnostic {
 pub struct TuningNote {
     pub channel: u8,
     pub note: u8,
+    pub velocity: f32,
     pub frequency: f32,
     pub cents_offset: f32,
 }
@@ -308,6 +314,21 @@ mod tests {
         let samples = Synthesizer::render_events(&events, 0.01);
         assert_eq!(samples.len(), 441);
         assert!(samples.iter().any(|sample| sample.abs() > 0.01));
+    }
+
+    #[test]
+    fn preserves_midi_velocity_in_voice_diagnostics() {
+        let mut synth = Synthesizer::new(SAMPLE_RATE);
+        let diagnostic = synth.handle_midi_event(MidiEvent {
+            time: 0.0,
+            channel: 0,
+            kind: MidiKind::NoteOn {
+                note: 60,
+                velocity: 64,
+            },
+        });
+        assert_eq!(diagnostic.notes.len(), 1);
+        assert!((diagnostic.notes[0].velocity - 64.0 / 127.0).abs() < 0.001);
     }
 
     #[test]

@@ -116,9 +116,10 @@ fn print_diagnostic(diagnostic: &crate::synth::TuningDiagnostic) {
     println!("MIDI update: key={key}, voices={}", diagnostic.notes.len());
     for note in &diagnostic.notes {
         println!(
-            "  ch {:>2} note {:>3}: {:>8.2} Hz ({:+.2} cents)",
+            "  ch {:>2} note {:>3}: velocity {:>3.0}% -> {:>8.2} Hz ({:+.2} cents)",
             note.channel + 1,
             note.note,
+            note.velocity * 100.0,
             note.frequency,
             note.cents_offset
         );

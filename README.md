@@ -44,7 +44,16 @@ cargo run -- render \
   "/path/to/Music/pachelbel_canon_and_gigue_phase1.wav"
 ```
 
-The `render` command prints diagnostics to the terminal before writing the WAV. The output file is mono, 16-bit PCM at 44.1 kHz.
+Add an optional waveform (`sine`, `square`, `saw`, `triangle`, or `pwm`) as the final argument:
+
+```sh
+cargo run -- render \
+  "/path/to/Music/pachelbel_canon_and_gigue_(c)icking-archive.mid" \
+  "/path/to/Music/pachelbel_canon_and_gigue_square.wav" \
+  square
+```
+
+The `render` command prints diagnostics to the terminal before writing the WAV. The output file is mono, 16-bit PCM at 44.1 kHz. If omitted, the waveform defaults to sine.
 
 To use a connected MIDI keyboard with the default audio output:
 

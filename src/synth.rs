@@ -281,14 +281,15 @@ impl Synthesizer {
     }
 
     pub fn render_events(events: &[MidiEvent], duration: f32) -> Vec<f32> {
-        Self::render_events_with_report(events, duration).0
+        Self::render_events_with_report(events, duration, Waveform::Sine).0
     }
 
     pub fn render_events_with_report(
         events: &[MidiEvent],
         duration: f32,
+        waveform: Waveform,
     ) -> (Vec<f32>, RenderReport) {
-        let mut synth = Self::new(SAMPLE_RATE);
+        let mut synth = Self::with_waveform(SAMPLE_RATE, waveform);
         let mut detector = KeyDetector::default();
         let mut report = RenderReport::default();
         let total_frames = (duration.max(0.0) * SAMPLE_RATE as f32).ceil() as usize;

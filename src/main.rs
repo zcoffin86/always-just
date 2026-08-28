@@ -37,11 +37,19 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .unwrap_or_default();
             realtime::run(args.get(2).map(String::as_str), waveform)
         }
-        Some("render") if args.len() == 4 => {
+        Some("render") if (4..=5).contains(&args.len()) => {
             let events = midi::read_file(&args[2])?;
             let duration = events.iter().map(|event| event.time).fold(0.0_f32, f32::max) + 1.0;
             print_diagnostics(&args[2], &events, duration);
-            let (samples, report) = Synthesizer::render_events_with_report(&events, duration);
+            let waveform = args
+                .get(4)
+                .map(|value| {
+                    Waveform::parse(value).ok_or_else(|| format!("unknown waveform: {value}"))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let (samples, report) =
+                Synthesizer::render_events_with_report(&events, duration, waveform);
             println!(
                 "  maximum Just Intonation offset: {:.2} cents",
                 report.max_tuning_offset_cents
@@ -64,7 +72,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("rendered {:.2}s demo to {}", duration, args[2]);
             Ok(())
         }
-        _ => Err("usage: aways-just demo <output.wav> [seconds]\n       aways-just render <input.mid> <output.wav>\n       aways-just realtime [midi-port-filter] [sine|square|saw|triangle|pwm]".into()),
+        _ => Err("usage: aways-just demo <output.wav> [seconds]\n       aways-just render <input.mid> <output.wav> [sine|square|saw|triangle|pwm]\n       aways-just realtime [midi-port-filter] [sine|square|saw|triangle|pwm]".into()),
     }
 }
 

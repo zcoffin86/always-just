@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::tuning::target_frequency;
 use crate::{
-    diagnostics::KeyDetector,
+    diagnostics::{HysteresisScale, KeyDetector},
     midi::{MidiEvent, MidiKind},
     midi_note_frequency, SAMPLE_RATE,
 };
@@ -128,6 +128,14 @@ impl Synthesizer {
     }
 
     pub fn with_waveform(sample_rate: u32, waveform: Waveform) -> Self {
+        Self::with_waveform_and_hysteresis(sample_rate, waveform, HysteresisScale::DEFAULT)
+    }
+
+    pub fn with_waveform_and_hysteresis(
+        sample_rate: u32,
+        waveform: Waveform,
+        hysteresis_scale: HysteresisScale,
+    ) -> Self {
         Self {
             voices: Vec::new(),
             sample_rate: sample_rate as f32,
@@ -135,7 +143,7 @@ impl Synthesizer {
             attack_samples: ((sample_rate as f32 * 0.005).round() as usize).max(1),
             release_samples: ((sample_rate as f32 * 0.01).round() as usize).max(1),
             smoothing_alpha: 1.0 - (-1.0 / (sample_rate as f32 * 0.015)).exp(),
-            detector: KeyDetector::default(),
+            detector: KeyDetector::with_hysteresis_scale(hysteresis_scale),
         }
     }
 
@@ -178,29 +186,17 @@ impl Synthesizer {
         match event.kind {
             MidiKind::NoteOn { note, velocity } => {
                 self.note_on(event.channel, note, velocity);
-                if velocity > 0 {
-                    self.detector.update_active(
-                        event.time,
-                        [(note, velocity)],
-                        self.voices
-                            .iter()
-                            .filter(|voice| voice.state != VoiceState::Releasing)
-                            .map(|voice| voice.note),
-                    );
-                }
             }
-            MidiKind::NoteOff { note } => {
-                self.note_off(event.channel, note);
-                self.detector.update_active(
-                    event.time,
-                    [],
-                    self.voices
-                        .iter()
-                        .filter(|voice| voice.state != VoiceState::Releasing)
-                        .map(|voice| voice.note),
-                );
-            }
+            MidiKind::NoteOff { note } => self.note_off(event.channel, note),
         }
+        self.detector.update_active(
+            event.time,
+            [],
+            self.voices
+                .iter()
+                .filter(|voice| voice.state != VoiceState::Releasing)
+                .map(|voice| voice.note),
+        );
         self.apply_key(self.detector.current());
         let key = self.detector.current();
         let notes = self
@@ -213,8 +209,10 @@ impl Synthesizer {
                     channel: voice.channel,
                     note: voice.note,
                     velocity: voice.amplitude / 0.2,
-                    frequency: tuned.map_or(voice.frequency, |value| value.frequency),
+                    frequency: tuned
+                        .map_or(midi_note_frequency(voice.note), |value| value.frequency),
                     cents_offset: tuned.map_or(0.0, |value| value.cents_offset),
+                    ratio: tuned.map(|value| value.ratio),
                 }
             })
             .collect();
@@ -289,8 +287,22 @@ impl Synthesizer {
         duration: f32,
         waveform: Waveform,
     ) -> (Vec<f32>, RenderReport) {
-        let mut synth = Self::with_waveform(SAMPLE_RATE, waveform);
-        let mut detector = KeyDetector::default();
+        Self::render_events_with_report_and_hysteresis(
+            events,
+            duration,
+            waveform,
+            HysteresisScale::DEFAULT,
+        )
+    }
+
+    pub fn render_events_with_report_and_hysteresis(
+        events: &[MidiEvent],
+        duration: f32,
+        waveform: Waveform,
+        hysteresis_scale: HysteresisScale,
+    ) -> (Vec<f32>, RenderReport) {
+        let mut synth = Self::with_waveform_and_hysteresis(SAMPLE_RATE, waveform, hysteresis_scale);
+        let mut detector = KeyDetector::with_hysteresis_scale(hysteresis_scale);
         let mut report = RenderReport::default();
         let total_frames = (duration.max(0.0) * SAMPLE_RATE as f32).ceil() as usize;
         let mut output = Vec::with_capacity(total_frames);
@@ -342,6 +354,7 @@ pub struct TuningNote {
     pub velocity: f32,
     pub frequency: f32,
     pub cents_offset: f32,
+    pub ratio: Option<crate::tuning::Ratio>,
 }
 
 #[cfg(test)]
@@ -396,6 +409,47 @@ mod tests {
         });
         assert_eq!(diagnostic.notes.len(), 1);
         assert!((diagnostic.notes[0].velocity - 64.0 / 127.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn recalculates_tuning_when_a_note_is_removed() {
+        let mut synth = Synthesizer::new(SAMPLE_RATE);
+        synth.handle_midi_event(MidiEvent {
+            time: 0.0,
+            channel: 0,
+            kind: MidiKind::NoteOn {
+                note: 60,
+                velocity: 100,
+            },
+        });
+        let chord = synth.handle_midi_event(MidiEvent {
+            time: 0.1,
+            channel: 0,
+            kind: MidiKind::NoteOn {
+                note: 64,
+                velocity: 100,
+            },
+        });
+        assert_eq!(
+            chord.key,
+            Some(crate::diagnostics::DetectedKey {
+                root: 0,
+                mode: crate::diagnostics::KeyMode::Major,
+            })
+        );
+        assert_eq!(chord.notes[1].ratio, Some(crate::tuning::Ratio::new(5, 4)));
+
+        let remaining_note = synth.handle_midi_event(MidiEvent {
+            time: 0.2,
+            channel: 0,
+            kind: MidiKind::NoteOff { note: 60 },
+        });
+        assert_eq!(remaining_note.key, None);
+        assert_eq!(remaining_note.notes.len(), 1);
+        assert_eq!(remaining_note.notes[0].note, 64);
+        assert_eq!(remaining_note.notes[0].ratio, None);
+        assert_eq!(remaining_note.notes[0].frequency, midi_note_frequency(64));
+        assert_eq!(remaining_note.notes[0].cents_offset, 0.0);
     }
 
     #[test]

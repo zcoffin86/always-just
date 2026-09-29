@@ -1,6 +1,6 @@
 # Always Just
 
-Always Just is a Rust-based, real-time-oriented microtonal synthesizer. It adjusts active MIDI pitches dynamically toward adaptive Just Intonation, reducing beat frequencies in polyphonic music. The current implementation is an offline renderer with the Phase 1 sine-synthesis foundation and a Phase 2 key-based tuning engine.
+Always Just is a Rust-based, real-time-oriented microtonal synthesizer. It adjusts active MIDI pitches dynamically toward adaptive Just Intonation, reducing beat frequencies in polyphonic music. The current implementation includes MIDI-file parsing and offline WAV rendering, plus live MIDI input and audio output, several oscillator waveforms, heuristic key detection, and key-based Just Intonation tuning.
 
 The project is intentionally local for now. MIDI and WAV files can live in a local music directory or any other local directory; no GitHub repository or online service is required to build or run it.
 
@@ -61,7 +61,17 @@ To use a connected MIDI keyboard with the default audio output:
 cargo run -- realtime "PSR-295/293"
 ```
 
-The first optional argument is a substring of the MIDI input port name. The second optional argument selects the oscillator waveform:
+Key-selection hysteresis can be scaled from `0` to `1` on live input, MIDI rendering, and the demo:
+
+```sh
+cargo run -- realtime "PSR-295/293" --key-hysteresis 0
+cargo run -- render input.mid output.wav --key-hysteresis 0.5
+cargo run -- demo demo.wav 2 --key-hysteresis 0
+```
+
+The default is `1`, which uses the current full key-switch thresholds (0.5 score points normally and 2.5 when the current tonic is the held bass). Intermediate values proportionally scale both thresholds. `0` removes the margin: the detector switches when a competing key scores strictly higher, but does not switch on a tie. The chosen scale is printed in the realtime and render diagnostics. Values outside `0..1` are rejected.
+
+For realtime playback, the first positional argument is an optional substring of the MIDI input port name. The next optional arguments select the oscillator waveform and output buffer size, in that order:
 
 ```sh
 cargo run -- realtime "PSR-295/293" square
@@ -75,14 +85,16 @@ Available waveforms are `sine`, `square`, `saw`, `triangle`, and `pwm` (a fixed 
 
 The real-time path requests a 256-frame output buffer (about 5.8 ms at 44.1 kHz). MIDI callbacks enqueue events into a bounded queue, while the audio callback owns and renders the synthesizer without taking a mutex or allocating a sample buffer on every callback. A slightly larger buffer is intentional: very small ALSA buffers can reduce latency but are more likely to underrun on systems whose audio scheduler cannot reliably service them.
 
-While playing, each MIDI note change also prints the current detected key and the tuning applied to every active note:
+While playing, each MIDI note-on or note-off recalculates the key from the currently held notes and updates the tuning targets. A single held note does not select a key, so its target returns to 12-TET. Releasing a note removes it from key detection immediately, although its short release envelope may still be audible. Each event prints the current detected key and the tuning applied to every held note, including the exact target ratio:
 
 ```text
 MIDI update: key=D major, voices=3
-  ch  1 note  62:   293.66 Hz (+0.00 cents)
-  ch  1 note  66:   366.96 Hz (-13.69 cents)
-  ch  1 note  69:   440.00 Hz (+1.96 cents)
+  ch  1 note  62:   293.66 Hz (+0.00 cents, ratio 1:1)
+  ch  1 note  66:   366.96 Hz (-13.69 cents, ratio 5:4)
+  ch  1 note  69:   440.00 Hz (+1.96 cents, ratio 3:2)
 ```
+
+When no key is selected, diagnostics identify the target as `12-TET` rather than showing a Just Intonation ratio. Tuned targets are smoothed over approximately 15 ms by the synthesizer.
 
 For visual verification, use the offline renderer to create a WAV, then open it in an audio editor such as Audacity. The waveform view can reveal clicks or discontinuities; a spectrogram or spectrum view can show the sine partials and frequency movement. Real-time terminal diagnostics confirm the MIDI events and tuning decisions but cannot display the audio waveform itself.
 
@@ -100,7 +112,9 @@ For each MIDI render, the application reports:
 - Heuristic key changes with timestamps
 - Active voice count and a confidence gap for each key estimate
 
-Key detection uses only the currently held notes, so released notes stop influencing the result immediately. A single active note does not select a key and remains at 12-TET; Just Intonation adjustments engage only when at least two notes sound together. Major/minor tonal profiles rank candidates using pitch classes plus octave-aware register information: the lowest sounding MIDI note and its intervals to the other active notes provide bass and voicing evidence. An existing key is retained unless a replacement has a meaningful score advantage. When the existing tonic is still held, the required advantage is higher so it acts as a sustained harmonic anchor and prevents newly added dissonant notes from abruptly retuning it. The detected key's tonic, rather than the lowest currently sounding note, is used as the Just Intonation tuning root. Brief or ambiguous passages can still produce uncertain estimates, so the confidence gap remains visible in the diagnostics.
+Key detection uses only the currently held notes, so released notes stop influencing the result immediately. A single active note does not select a key and remains at 12-TET; Just Intonation adjustments engage only when at least two notes sound together. Major/minor tonal profiles rank candidates using pitch classes plus octave-aware register information: the lowest sounding MIDI note and its intervals to the other active notes provide bass and voicing evidence. An existing key is retained unless a replacement has a positive score advantage that meets the configured hysteresis margin. When the existing tonic is still held as the lowest note, the full margin is 2.5 score points; otherwise it is 0.5. The detected key's tonic, rather than necessarily the lowest currently sounding note, is used as the Just Intonation tuning root. The `--key-hysteresis` option scales both margins from zero to one. Brief or ambiguous passages can still produce uncertain estimates, so the confidence gap remains visible in the diagnostics.
+
+The tuning table maps pitch-class intervals from the detected tonic to exact ratios, with mode-specific entries. For example, a minor-key harmonic seventh uses `7:4` (about -31.17 cents from 12-TET), while the major seventh uses `15:8` (about -11.73 cents). Both the ratio and cents offset are shown per voice in realtime output.
 
 Example output:
 
@@ -292,9 +306,9 @@ private:
 * **Phase 3 (Chiptune Synthesis):** NES pulse/triangle wave generation with simple ADSR, bandlimited synthesis (BLEP) to eliminate aliasing.
 * **Phase 4 (UI & Host Integration):** Waveform visualization, tuning offset display (cents shift indicator), and optional plugin wrappers (VST3/CLAP).
 
-## Phase 1 Rust Proof of Concept
+## Current Rust Implementation
 
-The first local implementation is a dependency-free Rust command-line renderer. It provides deterministic sine-wave synthesis with short attack/release ramps, polyphonic note tracking, 12-TET MIDI frequency conversion, a minimal Standard MIDI File parser (format 0/1, tempo changes, and note events), diagnostic output with active-voice statistics and heuristic key-change detection, and mono 16-bit PCM WAV output.
+The local Rust implementation provides deterministic synthesis and offline rendering as well as optional live MIDI/audio I/O. It includes polyphonic note tracking, 12-TET MIDI frequency conversion, a Standard MIDI File parser (format 0/1, tempo changes, and note events), heuristic major/minor key detection with configurable hysteresis, mode-dependent Just Intonation targets, frequency smoothing, diagnostic output, and mono 16-bit PCM WAV output. The realtime path uses MIDI input and the default audio output device; the core tuning and rendering logic remains testable without audio hardware.
 
 ```sh
 cargo check
@@ -304,17 +318,19 @@ cargo test
 cargo test <test_name_substring>
 cargo run -- demo demo.wav 2
 cargo run -- render input.mid output.wav
+cargo run -- realtime "MIDI device name" --key-hysteresis 0
 ```
 
-The renderer is intentionally offline; live MIDI devices and real-time audio backends are planned for later phases. The core synthesis and MIDI modules are kept independent of audio hardware so they can be tested deterministically.
+The offline renderer and live audio path share the same synthesizer and key-detection behavior. The core synthesis and MIDI logic is kept testable without audio hardware.
 
 ### Current source layout
 
-The implementation is organized around a small dependency-free Cargo crate:
+The implementation is organized around a small Cargo crate. Live MIDI and audio use the `midir` and `cpal` backends; pure tuning, synthesis, and offline-rendering tests do not require audio hardware:
 
 - `src/midi.rs` parses supported MIDI events and converts ticks to seconds.
-- `src/synth.rs` tracks voices and renders sine samples with short attack/release ramps.
-- `src/diagnostics.rs` analyzes polyphony and estimates key movement for terminal output.
-- `src/tuning.rs` maps the detected key and active notes to Just Intonation target frequencies.
+- `src/synth.rs` tracks voices, recalculates tuning on note-on and note-off, smooths target-frequency changes, and renders the selected waveform with short attack/release ramps.
+- `src/diagnostics.rs` analyzes polyphony, estimates keys from currently held notes, and applies configurable key-switch hysteresis.
+- `src/tuning.rs` maps the detected key and active notes to Just Intonation target frequencies and exposes each target ratio for diagnostics.
 - `src/wav.rs` writes mono 16-bit PCM WAV files.
-- `src/main.rs` provides the `demo` and `render` commands.
+- `src/realtime.rs` connects live MIDI input to the synthesizer and the default audio output.
+- `src/main.rs` provides the `demo`, `render`, and `realtime` commands.

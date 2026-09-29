@@ -15,6 +15,32 @@ const MINOR_PROFILE: [f32; 12] = [
 ];
 const KEY_SWITCH_MARGIN: f32 = 0.5;
 const ANCHORED_KEY_SWITCH_MARGIN: f32 = 2.5;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HysteresisScale(f32);
+
+impl HysteresisScale {
+    pub const DEFAULT: Self = Self(1.0);
+
+    pub fn new(scale: f32) -> Result<Self, &'static str> {
+        if scale.is_finite() && (0.0..=1.0).contains(&scale) {
+            Ok(Self(scale))
+        } else {
+            Err("key hysteresis must be a number from 0 to 1")
+        }
+    }
+
+    pub fn value(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for HysteresisScale {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyMode {
     Major,
@@ -27,13 +53,21 @@ pub struct DetectedKey {
     pub mode: KeyMode,
 }
 
-#[derive(Default)]
 pub struct KeyDetector {
     current: Option<DetectedKey>,
     confidence: f32,
+    hysteresis_scale: HysteresisScale,
 }
 
 impl KeyDetector {
+    pub fn with_hysteresis_scale(hysteresis_scale: HysteresisScale) -> Self {
+        Self {
+            current: None,
+            confidence: 0.0,
+            hysteresis_scale,
+        }
+    }
+
     pub fn update_active(
         &mut self,
         _time: f32,
@@ -58,7 +92,8 @@ impl KeyDetector {
                 } else {
                     KEY_SWITCH_MARGIN
                 };
-                candidate_score - key_score_from_notes(&active_notes, current) >= margin
+                let advantage = candidate_score - key_score_from_notes(&active_notes, current);
+                advantage > 0.0 && advantage >= margin * self.hysteresis_scale.value()
             }
             _ => true,
         };
@@ -74,6 +109,12 @@ impl KeyDetector {
 
     pub fn confidence(&self) -> f32 {
         self.confidence
+    }
+}
+
+impl Default for KeyDetector {
+    fn default() -> Self {
+        Self::with_hysteresis_scale(HysteresisScale::DEFAULT)
     }
 }
 
@@ -100,8 +141,15 @@ pub struct Analysis {
 }
 
 pub fn analyze(events: &[MidiEvent]) -> Analysis {
+    analyze_with_hysteresis_scale(events, HysteresisScale::DEFAULT)
+}
+
+pub fn analyze_with_hysteresis_scale(
+    events: &[MidiEvent],
+    hysteresis_scale: HysteresisScale,
+) -> Analysis {
     let mut active: HashMap<(u8, u8), u8> = HashMap::new();
-    let mut detector = KeyDetector::default();
+    let mut detector = KeyDetector::with_hysteresis_scale(hysteresis_scale);
     let mut note_on_count = 0;
     let mut note_off_count = 0;
     let mut max_polyphony = 0;
@@ -300,6 +348,41 @@ mod tests {
                 mode: KeyMode::Major
             })
         );
+    }
+
+    #[test]
+    fn hysteresis_scale_controls_how_quickly_key_selection_changes() {
+        let mut stable = KeyDetector::default();
+        stable.update_active(0.0, [], [60, 64, 67]);
+        stable.update_active(0.1, [], [60, 67, 70]);
+        assert_eq!(
+            stable.current(),
+            Some(DetectedKey {
+                root: 0,
+                mode: KeyMode::Major,
+            })
+        );
+
+        let mut responsive = KeyDetector::with_hysteresis_scale(
+            HysteresisScale::new(0.0).expect("zero is a valid hysteresis scale"),
+        );
+        responsive.update_active(0.0, [], [60, 64, 67]);
+        responsive.update_active(0.1, [], [60, 67, 70]);
+        assert_eq!(
+            responsive.current(),
+            Some(DetectedKey {
+                root: 0,
+                mode: KeyMode::Minor,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_hysteresis_scales_outside_zero_to_one() {
+        assert!(HysteresisScale::new(-0.1).is_err());
+        assert!(HysteresisScale::new(1.1).is_err());
+        assert!(HysteresisScale::new(f32::NAN).is_err());
+        assert!(HysteresisScale::new(0.5).is_ok());
     }
 
     #[test]

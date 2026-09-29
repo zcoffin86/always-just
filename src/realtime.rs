@@ -13,6 +13,7 @@ use cpal::{
 use midir::{Ignore, MidiInput};
 
 use crate::{
+    diagnostics::HysteresisScale,
     midi::{MidiEvent, MidiKind},
     synth::{Synthesizer, Waveform},
 };
@@ -23,6 +24,20 @@ pub fn run(
     port_filter: Option<&str>,
     waveform: Waveform,
     buffer_frames: u32,
+) -> Result<(), Box<dyn Error>> {
+    run_with_hysteresis_scale(
+        port_filter,
+        waveform,
+        buffer_frames,
+        HysteresisScale::DEFAULT,
+    )
+}
+
+pub fn run_with_hysteresis_scale(
+    port_filter: Option<&str>,
+    waveform: Waveform,
+    buffer_frames: u32,
+    hysteresis_scale: HysteresisScale,
 ) -> Result<(), Box<dyn Error>> {
     let mut midi = MidiInput::new("aways-just")?;
     midi.ignore(Ignore::None);
@@ -74,20 +89,20 @@ pub fn run(
         sample_rate: cpal::SampleRate(sample_rate),
         buffer_size: cpal::BufferSize::Fixed(buffer_frames),
     };
-    let channels = usize::from(config.channels);
     let stream = build_stream_for_format(
         &device,
         &config,
-        channels,
         midi_receiver,
         diagnostic_sender,
         waveform,
+        hysteresis_scale,
         supported.sample_format(),
     )?;
     stream.play()?;
 
     println!("MIDI input: {port_name}");
     println!("waveform: {}", waveform_name(waveform));
+    println!("key hysteresis: {:.2}", hysteresis_scale.value());
     println!(
         "audio output: {} ({} channels at {} Hz)",
         device.name().unwrap_or_else(|_| "unknown".into()),
@@ -121,8 +136,12 @@ fn print_diagnostic(diagnostic: &crate::synth::TuningDiagnostic) {
         .map_or_else(|| "unknown".to_owned(), |key| key.to_string());
     println!("MIDI update: key={key}, voices={}", diagnostic.notes.len());
     for note in &diagnostic.notes {
+        let tuning = note.ratio.map_or_else(
+            || "12-TET".to_owned(),
+            |ratio| format!("{}:{}", ratio.numerator, ratio.denominator),
+        );
         println!(
-            "  ch {:>2} note {:>3}: velocity {:>3.0}% -> {:>8.2} Hz ({:+.2} cents)",
+            "  ch {:>2} note {:>3}: velocity {:>3.0}% -> {:>8.2} Hz ({:+.2} cents, ratio {tuning})",
             note.channel + 1,
             note.note,
             note.velocity * 100.0,
@@ -156,11 +175,13 @@ fn build_stream<T>(
     midi_receiver: Receiver<MidiEvent>,
     diagnostic_sender: SyncSender<crate::synth::TuningDiagnostic>,
     waveform: Waveform,
+    hysteresis_scale: HysteresisScale,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: Sample + SizedSample + FromSample<f32>,
 {
-    let mut synth = Synthesizer::with_waveform(config.sample_rate.0, waveform);
+    let mut synth =
+        Synthesizer::with_waveform_and_hysteresis(config.sample_rate.0, waveform, hysteresis_scale);
     device.build_output_stream(
         config,
         move |output: &mut [T], _| {
@@ -184,12 +205,13 @@ where
 fn build_stream_for_format(
     device: &cpal::Device,
     config: &StreamConfig,
-    channels: usize,
     midi_receiver: Receiver<MidiEvent>,
     diagnostic_sender: SyncSender<crate::synth::TuningDiagnostic>,
     waveform: Waveform,
+    hysteresis_scale: HysteresisScale,
     format: SampleFormat,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
+    let channels = usize::from(config.channels);
     match format {
         SampleFormat::F32 => build_stream::<f32>(
             device,
@@ -198,6 +220,7 @@ fn build_stream_for_format(
             midi_receiver,
             diagnostic_sender,
             waveform,
+            hysteresis_scale,
         ),
         SampleFormat::I16 => build_stream::<i16>(
             device,
@@ -206,6 +229,7 @@ fn build_stream_for_format(
             midi_receiver,
             diagnostic_sender,
             waveform,
+            hysteresis_scale,
         ),
         SampleFormat::U16 => build_stream::<u16>(
             device,
@@ -214,6 +238,7 @@ fn build_stream_for_format(
             midi_receiver,
             diagnostic_sender,
             waveform,
+            hysteresis_scale,
         ),
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
     }
